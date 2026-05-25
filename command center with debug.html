@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+<meta charset="utf-8">
+<title>LoRa GPS Tracker Dashboard</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+
+<style>
+
+body {
+    font-family: Arial;
+    margin: 0;
+    background: #111;
+    color: white;
+}
+
+#container {
+    display: flex;
+    height: 100vh;
+}
+
+#left {
+    width: 35%;
+    overflow: auto;
+    padding: 10px;
+}
+
+#right {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+#serialbar {
+    background: #222;
+    padding: 10px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+#status {
+    font-weight: bold;
+}
+
+.card {
+    background: #222;
+    padding: 12px;
+    margin-bottom: 10px;
+    border-radius: 6px;
+}
+
+button {
+    padding: 6px 10px;
+    cursor: pointer;
+}
+
+input {
+    width: 100%;
+    margin-top: 5px;
+    padding: 4px;
+}
+
+#map {
+    height: 60%;
+}
+
+#terminal {
+    height: 40%;
+    background: black;
+    overflow: auto;
+    padding: 6px;
+    font-family: monospace;
+    font-size: 13px;
+}
+
+.online { color: #00ff88; font-weight: bold; }
+.offline { color: #ff4444; font-weight: bold; }
+
+/* SIGNAL */
+
+.signalBox {
+    border: 1px solid #555;
+    padding: 3px 4px;
+    display: inline-block;
+    margin-left: 8px;
+}
+
+.signalBar {
+    display: inline-block;
+    width: 10px;
+    margin-right: 2px;
+    background: #222;
+}
+
+.bar1 { height: 6px; }
+.bar2 { height: 9px; }
+.bar3 { height: 12px; }
+.bar4 { height: 15px; }
+.bar5 { height: 18px; }
+
+</style>
+
+</head>
+
+<body>
+
+<div id="container">
+
+<div id="left">
+
+<div id="serialbar">
+<button onclick="connect()">CONNECT</button>
+<button onclick="disconnect()">DISCONNECT</button>
+<button onclick="fireAll()">🔥 FIRE ALL</button>
+<span id="status">DISCONNECTED</span>
+</div>
+
+<div id="clients"></div>
+
+</div>
+
+<div id="right">
+<div id="map"></div>
+<div id="terminal"></div>
+</div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+<script>
+
+/* GLOBALS */
+
+let port = null
+let reader = null
+let writer = null
+
+let clients = {
+    1: { id: 1 },
+    2: { id: 2 },
+    3: { id: 3 }
+}
+
+let markers = {}
+
+/* MAP */
+
+let map = L.map('map').setView([23.78, 90.36], 13)
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19
+}).addTo(map)
+
+let redIcon = new L.Icon({
+    iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-red.png',
+    shadowUrl: 'https://unpkg.com/leaflet@1.7.1/dist/images/marker-shadow.png',
+    iconSize: [25, 41],
+    iconAnchor: [12, 41]
+})
+
+/* TERMINAL */
+
+function log(msg) {
+    let t = document.getElementById("terminal")
+    t.innerHTML += msg + "<br>"
+    t.scrollTop = t.scrollHeight
+}
+
+/* SERIAL EVENTS */
+
+navigator.serial.addEventListener("disconnect", event => {
+    log("Device disconnected")
+    document.getElementById("status").innerText = "DISCONNECTED"
+})
+
+/* CONNECT */
+
+async function connect() {
+
+    try {
+        port = await navigator.serial.requestPort()
+        await port.open({ baudRate: 115200 })
+
+        writer = port.writable.getWriter()
+        reader = port.readable.getReader()
+
+        document.getElementById("status").innerText = "CONNECTED"
+
+        log("Serial Connected")
+
+        readLoop()
+
+    } catch {
+        log("Connection failed")
+    }
+}
+
+/* DISCONNECT */
+
+async function disconnect() {
+
+    try {
+
+        if (reader) {
+            await reader.cancel()
+            reader.releaseLock()
+        }
+
+        if (writer) {
+            writer.releaseLock()
+        }
+
+        if (port) {
+            await port.close()
+        }
+
+        document.getElementById("status").innerText = "DISCONNECTED"
+        log("Serial Disconnected")
+
+    } catch {
+        log("Error closing port")
+    }
+}
+
+/* READ LOOP */
+
+async function readLoop() {
+
+    const decoder = new TextDecoder()
+    let buffer = ""
+
+    try {
+
+        while (true) {
+
+            const { value, done } = await reader.read()
+            if (done) break
+
+            buffer += decoder.decode(value)
+
+            let lines = buffer.split("\n")
+            buffer = lines.pop()
+
+            for (let line of lines) {
+                line = line.trim()
+                log("&lt; " + line)
+                handleLine(line)
+            }
+        }
+
+    } catch {
+        log("Serial stopped")
+    }
+}
+
+/* HANDLE SERIAL */
+
+function handleLine(line) {
+
+    // JSON update
+    if (line.startsWith("{")) {
+        try {
+            let data = JSON.parse(line)
+            updateClients(data.clients)
+        } catch {}
+    }
+
+    // READY detection
+    if (line.includes("READY|")) {
+        try {
+            let parts = line.split(",")
+            let payload = parts[2]
+
+            if (payload.startsWith("READY|")) {
+                let id = payload.split("|")[1]
+
+                let el = document.getElementById("ready" + id)
+                if (el) el.style.display = "inline"
+
+                log("Client " + id + " READY")
+            }
+        } catch {}
+    }
+}
+
+/* SIGNAL */
+
+function rssiToBars(rssi) {
+    if (rssi > -60) return 5
+    if (rssi > -70) return 4
+    if (rssi > -85) return 3
+    if (rssi > -100) return 2
+    return 1
+}
+
+function barColor(level) {
+    if (level >= 4) return "#00ff00"
+    if (level == 3) return "#ffaa00"
+    return "#ff3333"
+}
+
+function buildSignalMeter(rssi) {
+
+    let level = rssiToBars(rssi)
+    let color = barColor(level)
+
+    let html = '<div class="signalBox">'
+
+    for (let i = 1; i <= 5; i++) {
+        let c = i <= level ? color : "#222"
+        html += `<div class="signalBar bar${i}" style="background:${c}"></div>`
+    }
+
+    html += '</div>'
+    return html
+}
+
+/* RENDER CLIENTS ONCE */
+
+function renderClients() {
+
+    let div = document.getElementById("clients")
+
+    for (let id in clients) {
+
+        let html = `
+<div class="card">
+
+<h3>
+PARTY ${id}
+<span id="ready${id}" style="color:#00ff88;margin-left:10px;display:none;">● READY</span>
+</h3>
+
+Status: <span id="status${id}">OFFLINE</span><br>
+GPS Ready: <span id="gps${id}">NO</span><br>
+
+<div style="display:flex;align-items:center;margin-top:6px">
+<div id="rssi${id}">Signal: -</div>
+<div id="meter${id}"></div>
+</div>
+
+Latitude: <span id="lat${id}">-</span><br>
+Longitude: <span id="lon${id}">-</span><br>
+
+<input id="msg${id}" placeholder="type message"
+onkeydown="if(event.key==='Enter'){sendMsg(${id})}">
+
+<button onclick="sendMsg(${id})">SEND</button>
+<button onclick="fire(${id})">FIRE</button>
+
+</div>
+`
+        div.innerHTML += html
+    }
+}
+
+/* UPDATE ONLY VALUES */
+
+function updateClients(list) {
+
+    for (let c of list) {
+
+        let gpsReady = (c.sat >= 5)
+        let rssi = c.rssi ?? -120
+
+        document.getElementById("status" + c.id).innerHTML =
+            c.online ? '<span class="online">ONLINE</span>' :
+                       '<span class="offline">OFFLINE</span>'
+
+        document.getElementById("gps" + c.id).innerText =
+            gpsReady ? "YES" : "NO"
+
+        document.getElementById("lat" + c.id).innerText = c.lat ?? "-"
+        document.getElementById("lon" + c.id).innerText = c.lon ?? "-"
+
+        document.getElementById("rssi" + c.id).innerText =
+            "Signal: " + rssi + " dBm"
+
+        document.getElementById("meter" + c.id).innerHTML =
+            buildSignalMeter(rssi)
+
+        clients[c.id] = { ...clients[c.id], ...c }
+    }
+
+    updateMap()
+}
+
+/* MAP */
+
+function updateMap() {
+
+    for (let id in clients) {
+
+        let c = clients[id]
+        if (!c.lat || !c.lon) continue
+
+        let pos = [c.lat, c.lon]
+
+        if (!markers[id]) {
+            let marker = L.marker(pos).addTo(map)
+            marker.bindTooltip("Client " + id, { permanent: true })
+            markers[id] = marker
+        } else {
+            markers[id].setLatLng(pos)
+        }
+
+        if (!c.online) {
+            markers[id].setIcon(redIcon)
+        }
+    }
+}
+
+/* SEND */
+
+async function send(cmd) {
+
+    if (!writer) {
+        alert("Serial not connected")
+        return
+    }
+
+    log("&gt; " + cmd)
+
+    let enc = new TextEncoder()
+    await writer.write(enc.encode(cmd + "\n"))
+}
+
+/* COMMANDS */
+
+function fireAll() {
+    send("AT+SEND=0,6,FIRE|0")
+}
+
+function fire(id) {
+    let payload = `FIRE|${id}`
+    send(`AT+SEND=0,${payload.length},${payload}`)
+}
+
+function sendMsg(id) {
+
+    let input = document.getElementById("msg" + id)
+    let msg = input.value.trim()
+
+    if (!msg) return alert("Enter a message")
+
+    let payload = `MSG|${id}|${msg}`
+
+    send(`AT+SEND=0,${payload.length},${payload}`)
+
+    input.value = ""
+}
+
+/* INIT */
+
+renderClients()
+
+</script>
+
+</body>
+</html>
