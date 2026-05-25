@@ -1,5 +1,6 @@
 # LoRa Based Covert Comm System
 # LoRa Based Covert Communication System
+![Dashboard](images/LoRa Based Covert Comm System.jpeg)
 
 A secure and covert long-range communication system built using **LoRa**, **ESP32**, GPS modules, and a custom Command Center dashboard.
 The system allows multiple field clients to communicate with each other using encrypted LoRa messages while sharing live GPS positions, silent vibration alerts, and display notifications.
